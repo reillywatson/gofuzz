@@ -26,10 +26,14 @@ import (
 // fuzzFuncMap is a map from a type to a fuzzFunc that handles that type.
 type fuzzFuncMap map[reflect.Type]reflect.Value
 
+// fillFuncMap is a map from a reflect.Kind to a function that generates that kind of data.
+type fillFuncMap map[reflect.Kind]func(reflect.Value, *rand.Rand)
+
 // Fuzzer knows how to fill any object with random fields.
 type Fuzzer struct {
 	fuzzFuncs        fuzzFuncMap
 	defaultFuzzFuncs fuzzFuncMap
+	fillFuncs        fillFuncMap
 	r                *rand.Rand
 	nilChance        float64
 	minElements      int
@@ -50,6 +54,7 @@ func NewWithSeed(seed int64) *Fuzzer {
 		},
 
 		fuzzFuncs:   fuzzFuncMap{},
+		fillFuncs:   defaultFillFuncMap(),
 		r:           rand.New(rand.NewSource(seed)),
 		nilChance:   .2,
 		minElements: 1,
@@ -98,6 +103,10 @@ func (f *Fuzzer) Funcs(fuzzFuncs ...interface{}) *Fuzzer {
 		f.fuzzFuncs[argT] = v
 	}
 	return f
+}
+
+func (f *Fuzzer) Fill(kind reflect.Kind, fn func(reflect.Value, *rand.Rand)) {
+	f.fillFuncs[kind] = fn
 }
 
 // RandSource causes f to get values from the given source of randomness.
@@ -227,7 +236,7 @@ func (fc *fuzzerContext) doFuzz(v reflect.Value, flags uint64) {
 		}
 	}
 
-	if fn, ok := fillFuncMap[v.Kind()]; ok {
+	if fn, ok := fc.fuzzer.fillFuncs[v.Kind()]; ok {
 		fn(v, fc.fuzzer.r)
 		return
 	}
@@ -283,7 +292,7 @@ func (fc *fuzzerContext) doFuzz(v reflect.Value, flags uint64) {
 	case reflect.Interface:
 		fallthrough
 	default:
-		panic(fmt.Sprintf("Can't handle %#v", v.Interface()))
+		panic(fmt.Sprintf("Can't handle %#v, type %v", v.Interface(), v.Type()))
 	}
 }
 
@@ -378,7 +387,7 @@ func (c Continue) FuzzNoCustom(obj interface{}) {
 // RandString makes a random string up to 20 characters long. The returned string
 // may include a variety of (valid) UTF-8 encodings.
 func (c Continue) RandString() string {
-	return randString(c.Rand)
+	return RandString(c.Rand)
 }
 
 // RandUint64 makes random 64 bit numbers.
@@ -409,39 +418,41 @@ func fuzzTime(t *time.Time, c Continue) {
 	*t = time.Unix(sec, nsec)
 }
 
-var fillFuncMap = map[reflect.Kind]func(reflect.Value, *rand.Rand){
-	reflect.Bool: func(v reflect.Value, r *rand.Rand) {
-		v.SetBool(randBool(r))
-	},
-	reflect.Int:     fuzzInt,
-	reflect.Int8:    fuzzInt,
-	reflect.Int16:   fuzzInt,
-	reflect.Int32:   fuzzInt,
-	reflect.Int64:   fuzzInt,
-	reflect.Uint:    fuzzUint,
-	reflect.Uint8:   fuzzUint,
-	reflect.Uint16:  fuzzUint,
-	reflect.Uint32:  fuzzUint,
-	reflect.Uint64:  fuzzUint,
-	reflect.Uintptr: fuzzUint,
-	reflect.Float32: func(v reflect.Value, r *rand.Rand) {
-		v.SetFloat(float64(r.Float32()))
-	},
-	reflect.Float64: func(v reflect.Value, r *rand.Rand) {
-		v.SetFloat(r.Float64())
-	},
-	reflect.Complex64: func(v reflect.Value, r *rand.Rand) {
-		panic("unimplemented")
-	},
-	reflect.Complex128: func(v reflect.Value, r *rand.Rand) {
-		panic("unimplemented")
-	},
-	reflect.String: func(v reflect.Value, r *rand.Rand) {
-		v.SetString(randString(r))
-	},
-	reflect.UnsafePointer: func(v reflect.Value, r *rand.Rand) {
-		panic("unimplemented")
-	},
+func defaultFillFuncMap() fillFuncMap {
+	return fillFuncMap{
+		reflect.Bool: func(v reflect.Value, r *rand.Rand) {
+			v.SetBool(randBool(r))
+		},
+		reflect.Int:     fuzzInt,
+		reflect.Int8:    fuzzInt,
+		reflect.Int16:   fuzzInt,
+		reflect.Int32:   fuzzInt,
+		reflect.Int64:   fuzzInt,
+		reflect.Uint:    fuzzUint,
+		reflect.Uint8:   fuzzUint,
+		reflect.Uint16:  fuzzUint,
+		reflect.Uint32:  fuzzUint,
+		reflect.Uint64:  fuzzUint,
+		reflect.Uintptr: fuzzUint,
+		reflect.Float32: func(v reflect.Value, r *rand.Rand) {
+			v.SetFloat(float64(r.Float32()))
+		},
+		reflect.Float64: func(v reflect.Value, r *rand.Rand) {
+			v.SetFloat(r.Float64())
+		},
+		reflect.Complex64: func(v reflect.Value, r *rand.Rand) {
+			panic("unimplemented")
+		},
+		reflect.Complex128: func(v reflect.Value, r *rand.Rand) {
+			panic("unimplemented")
+		},
+		reflect.String: func(v reflect.Value, r *rand.Rand) {
+			v.SetString(RandString(r))
+		},
+		reflect.UnsafePointer: func(v reflect.Value, r *rand.Rand) {
+			panic("unimplemented")
+		},
+	}
 }
 
 // randBool returns true or false randomly.
@@ -469,9 +480,9 @@ var unicodeRanges = []charRange{
 	{'\u4e00', '\u9fff'}, // Common CJK (even longer encodings)
 }
 
-// randString makes a random string up to 20 characters long. The returned string
+// RandString makes a random string up to 20 characters long. The returned string
 // may include a variety of (valid) UTF-8 encodings.
-func randString(r *rand.Rand) string {
+func RandString(r *rand.Rand) string {
 	n := r.Intn(20)
 	runes := make([]rune, n)
 	for i := range runes {
