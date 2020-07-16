@@ -17,7 +17,10 @@ limitations under the License.
 package fuzz
 
 import (
+	"math/rand"
 	"reflect"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -38,6 +41,8 @@ func TestFuzz_basic(t *testing.T) {
 		S    string
 		B    bool
 		T    time.Time
+		C64  complex64
+		C128 complex128
 	}{}
 
 	failed := map[string]int{}
@@ -84,6 +89,12 @@ func TestFuzz_basic(t *testing.T) {
 			failed[n] = failed[n] + 1
 		}
 		if n, v := "t", obj.T; v.IsZero() {
+			failed[n] = failed[n] + 1
+		}
+		if n, v := "c64", obj.C64; v == 0 {
+			failed[n] = failed[n] + 1
+		}
+		if n, v := "c128", obj.C128; v == 0 {
 			failed[n] = failed[n] + 1
 		}
 	}
@@ -468,5 +479,176 @@ func TestFuzz_Maxdepth(t *testing.T) {
 		} else if obj.S.S.S != nil {
 			t.Errorf("Expected obj.S.S.S nil")
 		}
+	}
+}
+
+func TestFuzz_SkipPattern(t *testing.T) {
+	obj := &struct {
+		S1    string
+		S2    string
+		XXX_S string
+		S_XXX string
+		In    struct {
+			Str    string
+			XXX_S1 string
+			S2_XXX string
+		}
+	}{}
+
+	f := New().NilChance(0).SkipFieldsWithPattern(regexp.MustCompile(`^XXX_`))
+	f.Fuzz(obj)
+
+	tryFuzz(t, f, obj, func() (int, bool) {
+		if obj.XXX_S != "" {
+			return 1, false
+		}
+		if obj.S_XXX == "" {
+			return 2, false
+		}
+		if obj.In.XXX_S1 != "" {
+			return 3, false
+		}
+		if obj.In.S2_XXX == "" {
+			return 4, false
+		}
+		return 5, true
+	})
+}
+
+type int63mode int
+
+const (
+	modeRandom int63mode = iota
+	modeFirst
+	modeLast
+)
+
+type customInt63 struct {
+	mode int63mode
+}
+
+func (c customInt63) Int63n(n int64) int64 {
+	switch c.mode {
+	case modeFirst:
+		return 0
+	case modeLast:
+		return n - 1
+	default:
+		return rand.Int63n(n)
+	}
+}
+
+func Test_charRange_choose(t *testing.T) {
+	lowercaseLetters := UnicodeRange{'a', 'z'}
+
+	t.Run("Picks first", func(t *testing.T) {
+		r := customInt63{mode: modeFirst}
+		letter := lowercaseLetters.choose(r)
+		if letter != 'a' {
+			t.Errorf("Expected a, got %v", letter)
+		}
+	})
+
+	t.Run("Picks last", func(t *testing.T) {
+		r := customInt63{mode: modeLast}
+		letter := lowercaseLetters.choose(r)
+		if letter != 'z' {
+			t.Errorf("Expected z, got %v", letter)
+		}
+	})
+}
+
+func Test_UnicodeRange_CustomStringFuzzFunc(t *testing.T) {
+	a2z := "abcdefghijklmnopqrstuvwxyz"
+
+	unicodeRange := UnicodeRange{'a', 'z'}
+	f := New().Funcs(unicodeRange.CustomStringFuzzFunc())
+	var myString string
+	f.Fuzz(&myString)
+
+	t.Run("Picks a-z string", func(t *testing.T) {
+		for i := range myString {
+			if !strings.ContainsRune(a2z, rune(myString[i])) {
+				t.Errorf("Expected a-z, got %v", string(myString[i]))
+			}
+		}
+	})
+}
+
+func Test_UnicodeRange_Check(t *testing.T) {
+	unicodeRange := UnicodeRange{'a', 'z'}
+
+	unicodeRange.check()
+}
+
+func Test_UnicodeRanges_CustomStringFuzzFunc(t *testing.T) {
+	a2z0to9 := "abcdefghijklmnopqrstuvwxyz0123456789"
+
+	unicodeRanges := UnicodeRanges{
+		{'a', 'z'},
+		{'0', '9'},
+	}
+	f := New().Funcs(unicodeRanges.CustomStringFuzzFunc())
+	var myString string
+	f.Fuzz(&myString)
+
+	t.Run("Picks a-z0-9 string", func(t *testing.T) {
+		for i := range myString {
+			if !strings.ContainsRune(a2z0to9, rune(myString[i])) {
+				t.Errorf("Expected a-z0-9, got %v", string(myString[i]))
+			}
+		}
+	})
+}
+
+func TestNewFromGoFuzz(t *testing.T) {
+	t.Parallel()
+
+	input := []byte{1, 2, 3}
+
+	var got int
+	NewFromGoFuzz(input).Fuzz(&got)
+
+	if want := 5563767293437588600; want != got {
+		t.Errorf("Fuzz(%q) = %d, want: %d", input, got, want)
+	}
+}
+
+func BenchmarkRandBool(b *testing.B) {
+	rs := rand.New(rand.NewSource(123))
+
+	for i := 0; i < b.N; i++ {
+		randBool(rs)
+	}
+}
+
+func BenchmarkRandString(b *testing.B) {
+	rs := rand.New(rand.NewSource(123))
+
+	for i := 0; i < b.N; i++ {
+		RandString(rs)
+	}
+}
+
+func BenchmarkUnicodeRangeRandString(b *testing.B) {
+	unicodeRange := UnicodeRange{'a', 'z'}
+
+	rs := rand.New(rand.NewSource(123))
+
+	for i := 0; i < b.N; i++ {
+		unicodeRange.randString(rs)
+	}
+}
+
+func BenchmarkUnicodeRangesRandString(b *testing.B) {
+	unicodeRanges := UnicodeRanges{
+		{'a', 'z'},
+		{'0', '9'},
+	}
+
+	rs := rand.New(rand.NewSource(123))
+
+	for i := 0; i < b.N; i++ {
+		unicodeRanges.randString(rs)
 	}
 }
